@@ -1,11 +1,15 @@
 import json
 import re
 import asyncio
+import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
 import config
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("grounded-qa")
 
 app = FastAPI()
 
@@ -103,16 +107,19 @@ async def grounded_answer(request: Request):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
+        async with httpx.AsyncClient(timeout=4.5) as client:
             resp = await client.post(
                 f"{config.AIPIPE_BASE}/chat/completions",
                 headers=HEADERS,
                 json=payload,
             )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            logger.error("AIPipe returned %s: %s", resp.status_code, resp.text[:500])
+            return fallback_response()
         raw_content = resp.json()["choices"][0]["message"]["content"]
         parsed = parse_json_safely(raw_content)
         if parsed is None:
+            logger.error("Could not parse model output as JSON: %r", raw_content[:500])
             return fallback_response()
 
         answerable = bool(parsed.get("answerable", False))
@@ -142,7 +149,12 @@ async def grounded_answer(request: Request):
             "answerable": True,
         }
 
-    except (httpx.TimeoutException, httpx.HTTPError, KeyError, IndexError, asyncio.TimeoutError):
+    except httpx.TimeoutException:
+        logger.error("AIPipe request timed out")
         return fallback_response()
-    except Exception:
+    except (httpx.HTTPError, KeyError, IndexError, asyncio.TimeoutError) as e:
+        logger.error("Request failed: %s: %s", type(e).__name__, e)
+        return fallback_response()
+    except Exception as e:
+        logger.error("Unexpected error: %s: %s", type(e).__name__, e)
         return fallback_response()
